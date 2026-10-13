@@ -5,25 +5,20 @@ import {
   MODELS,
   formatBytes,
   isModelCached,
-  clearModelCache,
   type Task,
 } from "@/lib/models";
 import {
   YoloEngine,
   readBackendPref,
-  type Backend,
   type BackendPref,
 } from "@/lib/engine";
 import { drawOverlay } from "@/lib/draw";
-import { classColor } from "@/lib/coco";
 import type { Detection } from "@/lib/postprocess";
 
-const TASKS: Task[] = ["seg", "pose", "detect"];
-
-const MODES: { task: Task; icon: string; label: string; blurb: string }[] = [
-  { task: "seg", icon: "◧", label: "Segmentation", blurb: "boxes + pixel masks" },
-  { task: "pose", icon: "⌇", label: "Pose estimation", blurb: "17 keypoints + skeleton" },
-  { task: "detect", icon: "⚠", label: "Defect inspection", blurb: "PCB AOI · 6 defect types" },
+const MODES: { task: Task; icon: string; label: string }[] = [
+  { task: "seg", icon: "◧", label: "Segmentation" },
+  { task: "pose", icon: "⌇", label: "Pose estimation" },
+  { task: "detect", icon: "⚠", label: "Defect inspection" },
 ];
 
 // Per-mode starting confidence. Defect inspection begins stricter (0.50) so
@@ -86,14 +81,7 @@ export default function YoloStudio() {
     pose: idleState(),
     detect: idleState(),
   });
-  const [backends, setBackends] = useState<Record<Task, Backend | null>>({
-    seg: null,
-    pose: null,
-    detect: null,
-  });
-  const [detections, setDetections] = useState<Detection[]>([]);
   const [stats, setStats] = useState<Stats>({ inferMs: 0, postMs: 0, fps: null });
-  const [imageSize, setImageSize] = useState({ w: 0, h: 0 });
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [engineVersion, setEngineVersion] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
@@ -164,13 +152,7 @@ export default function YoloStudio() {
           }
 
           engines.current.set(task, engine);
-          setBackends((b) => ({ ...b, [task]: engine.backend }));
-          setLoad({
-            state: "ready",
-            pct: 100,
-            cached: true,
-            message: `${engine.backend.toUpperCase()} · warm-up ${engine.warmupMs} ms`,
-          });
+          setLoad({ state: "ready", pct: 100, cached: true, message: "" });
           setEngineVersion((v) => v + 1);
           return engine;
         } catch (err) {
@@ -253,11 +235,10 @@ export default function YoloStudio() {
         ui.current.conf,
       );
       detsRef.current = r.detections;
-      setDetections(r.detections);
       setStats({ inferMs: r.inferMs, postMs: r.postMs, fps: null });
       paintFrame();
     } catch {
-      /* the model card already shows the error */
+      /* a failed load surfaces in the viewport overlay */
     } finally {
       busyRef.current = false;
       setAnalyzing(false);
@@ -270,7 +251,6 @@ export default function YoloStudio() {
     if (!engine || !imageRef.current) return;
     const dets = engine.reprocess(ui.current.conf);
     detsRef.current = dets;
-    setDetections(dets);
     paintFrame();
   }, [paintFrame]);
 
@@ -296,7 +276,6 @@ export default function YoloStudio() {
           lastListUpdate.current = now;
           const avg =
             frameTimes.current.reduce((a, b) => a + b, 0) / frameTimes.current.length;
-          setDetections(r.detections);
           setStats({ inferMs: r.inferMs, postMs: r.postMs, fps: 1000 / avg });
         }
       })
@@ -342,7 +321,6 @@ export default function YoloStudio() {
       sourceTypeRef.current = "camera";
       setSourceType("camera");
       detsRef.current = [];
-      setDetections([]);
     } catch (err) {
       setCameraError(
         err instanceof Error
@@ -364,7 +342,6 @@ export default function YoloStudio() {
     sourceTypeRef.current = "still";
     setSourceType("still");
     detsRef.current = [];
-    setDetections([]);
     requestAnimationFrame(() => {
       paintFrame();
       void analyzeStill();
@@ -379,9 +356,7 @@ export default function YoloStudio() {
       img.decoding = "async";
       img.onload = () => {
         imageRef.current = img;
-        setImageSize({ w: img.naturalWidth, h: img.naturalHeight });
         detsRef.current = [];
-        setDetections([]);
         paintFrame();
         void analyzeStill();
       };
@@ -483,7 +458,6 @@ export default function YoloStudio() {
     ui.current.mode = task;
     setMode(task);
     detsRef.current = [];
-    setDetections([]);
     setStats({ inferMs: 0, postMs: 0, fps: null });
     // Restore this mode's confidence (defect mode defaults to 0.50).
     const nextConf = confByTask.current[task];
@@ -524,7 +498,6 @@ export default function YoloStudio() {
     engines.current.forEach((e) => e.dispose());
     engines.current.clear();
     pending.current.clear();
-    setBackends({ seg: null, pose: null, detect: null });
     setLoads({ seg: idleState(), pose: idleState(), detect: idleState() });
   };
 
@@ -534,19 +507,7 @@ export default function YoloStudio() {
     setBackendPref(pref);
   };
 
-  const wipeCache = async () => {
-    await clearModelCache();
-    // Force a fresh load of the active model so the new download is used,
-    // even when the backend preference is unchanged.
-    resetEngines();
-    void ensureEngine(ui.current.mode).catch(() => {});
-  };
-
   const activeLoad = loads[mode];
-  const activeBackend = backends[mode];
-  const showOverlay = activeLoad.state !== "ready";
-  const showEmptyHint =
-    activeLoad.state === "ready" && detections.length === 0 && !analyzing;
 
   return (
     <div className="min-h-screen">
@@ -556,36 +517,34 @@ export default function YoloStudio() {
             <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-sky-400 to-violet-500 font-black text-[#05070b]">
               Y
             </div>
-            <div>
-              <h1 className="text-sm font-semibold leading-tight">YOLO26 Studio</h1>
-              <p className="text-[11px] leading-tight text-white/45">
-                On-device · seg, pose &amp; defect QA
-              </p>
-            </div>
+            <h1 className="text-sm font-semibold leading-tight">YOLO26 Studio</h1>
           </div>
 
-          <div className="ml-auto flex items-center gap-2 text-[11px] text-white/45">
-            <span
-              className={
-                "rounded-md px-1.5 py-0.5 font-semibold " +
-                (activeBackend === "webgpu"
-                  ? "bg-emerald-400/15 text-emerald-300"
-                  : "bg-amber-400/15 text-amber-300")
-              }
-            >
-              {activeBackend ? activeBackend.toUpperCase() : "…"}
-            </span>
+          <div className="ml-auto flex items-center gap-2">
+            {(["auto", "webgpu", "wasm"] as BackendPref[]).map((p) => (
+              <button
+                key={p}
+                onClick={() => changeBackend(p)}
+                className={
+                  "rounded-md border px-2.5 py-1 text-[11px] font-medium transition " +
+                  (backendPref === p
+                    ? "border-transparent bg-white/15 text-white"
+                    : "border-white/10 text-white/50 hover:text-white")
+                }
+              >
+                {p === "auto" ? "Auto" : p.toUpperCase()}
+              </button>
+            ))}
           </div>
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-[1400px] gap-5 p-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="mx-auto grid max-w-[1400px] gap-5 p-4 lg:grid-cols-[minmax(0,1fr)_320px]">
         {/* ---------------- viewport ---------------- */}
         <section className="panel overflow-hidden">
           {/* big, unmissable mode switch */}
           <div className="grid grid-cols-1 gap-2 p-2 sm:grid-cols-3">
             {MODES.map((m) => {
-              const load = loads[m.task];
               const active = mode === m.task;
               return (
                 <button
@@ -593,36 +552,22 @@ export default function YoloStudio() {
                   onClick={() => selectMode(m.task)}
                   aria-pressed={active}
                   className={
-                    "flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition " +
+                    "flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-semibold transition " +
                     (active
                       ? "border-transparent bg-gradient-to-r from-sky-400/90 to-violet-400/90 text-[#05070b]"
                       : "border-white/10 bg-white/[0.03] text-white/80 hover:bg-white/[0.07]")
                   }
                 >
-                  <span className="text-xl leading-none" aria-hidden>
+                  <span className="text-lg leading-none" aria-hidden>
                     {m.icon}
                   </span>
-                  <span className="min-w-0">
-                    <span className="block text-sm font-semibold">{m.label}</span>
-                    <span
-                      className={
-                        "block truncate text-[11px] " +
-                        (active ? "text-[#05070b]/70" : "text-white/45")
-                      }
-                    >
-                      {m.blurb}
-                    </span>
-                  </span>
-                  <ModeBadge load={load} active={active} />
+                  {m.label}
                 </button>
               );
             })}
           </div>
 
           <div className="flex flex-wrap items-center gap-2 border-y border-white/10 px-3 py-2">
-            <span className="text-[11px] font-medium uppercase tracking-wider text-white/40">
-              Source
-            </span>
             <label className="cursor-pointer rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs hover:bg-white/[0.08]">
               Upload image
               <input
@@ -647,12 +592,6 @@ export default function YoloStudio() {
             >
               {sourceType === "camera" ? "◼ Stop camera" : "● Live camera"}
             </button>
-
-            {imageSize.w > 0 && (
-              <span className="ml-auto text-[11px] tabular-nums text-white/45">
-                {imageSize.w}×{imageSize.h}
-              </span>
-            )}
           </div>
 
           <div
@@ -673,33 +612,15 @@ export default function YoloStudio() {
             <video ref={videoRef} playsInline muted className="hidden" />
             <canvas ref={canvasRef} className="block h-auto w-full" />
 
-            {showOverlay && (
-              <div className="absolute inset-0 grid place-items-center bg-[#070a0f]/70 backdrop-blur-sm">
-                <div className="w-[min(380px,86%)] rounded-2xl border border-white/10 bg-[#0b1220]/90 p-5">
-                  <div className="mb-2 flex items-baseline justify-between">
-                    <span className="text-sm font-semibold">
-                      Preparing {MODELS[mode].id}
-                    </span>
-                    <span className="text-xs tabular-nums text-white/50">
-                      {activeLoad.pct}%
-                    </span>
-                  </div>
-                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-sky-400 to-violet-400 transition-all"
-                      style={{ width: `${activeLoad.pct}%` }}
-                    />
-                  </div>
-                  <p className="mt-3 text-xs leading-relaxed text-white/50">
-                    {activeLoad.state === "error"
-                      ? activeLoad.message
-                      : `Downloading / loading the model — ${activeLoad.message}`}
+            {activeLoad.state !== "ready" && (
+              <div className="absolute inset-0 grid place-items-center bg-[#070a0f]/60 backdrop-blur-sm">
+                {activeLoad.state === "error" ? (
+                  <p className="max-w-[min(360px,86%)] rounded-xl border border-rose-400/30 bg-rose-950/70 px-4 py-3 text-center text-xs text-rose-200">
+                    {activeLoad.message}
                   </p>
-                  <p className="mt-1 text-[11px] leading-relaxed text-white/35">
-                    Models load on demand and are cached on this device for
-                    offline use.
-                  </p>
-                </div>
+                ) : (
+                  <span className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-sky-400" />
+                )}
               </div>
             )}
 
@@ -710,168 +631,21 @@ export default function YoloStudio() {
             )}
           </div>
 
-          {showEmptyHint && (
-            <div
-              className={
-                "border-t px-4 py-2 text-xs " +
-                (mode === "detect"
-                  ? "border-white/10 bg-emerald-400/10 text-emerald-200"
-                  : "border-white/10 bg-amber-400/10 text-amber-200")
-              }
-            >
-              {mode === "pose" ? (
-                <>
-                  Pose only detects people.{" "}
-                  <button
-                    className="underline"
-                    onClick={() =>
-                      selectSample(SAMPLES.find((s) => s.id === "zidane")!)
-                    }
-                  >
-                    Try the Footballers sample
-                  </button>
-                  .
-                </>
-              ) : mode === "detect" ? (
-                <>
-                  No defects above {conf.toFixed(2)} confidence — this board reads
-                  clean. Lower the threshold to catch fainter defects.
-                </>
-              ) : (
-                <>
-                  Nothing above {conf.toFixed(2)} confidence. Lower the threshold or
-                  try another image.
-                </>
-              )}
-            </div>
-          )}
-
-          <div className="grid grid-cols-2 gap-x-4 gap-y-3 border-t border-white/10 px-4 py-3 sm:grid-cols-4">
-            <Metric
-              label="Inference"
-              value={stats.inferMs ? `${stats.inferMs.toFixed(0)} ms` : "—"}
-            />
-            <Metric
-              label="Post-process"
-              value={stats.postMs ? `${stats.postMs.toFixed(1)} ms` : "—"}
-            />
-            <Metric
-              label={
-                sourceType === "camera"
-                  ? "FPS"
-                  : mode === "detect"
-                    ? "Defects"
-                    : "Objects"
-              }
-              value={
-                sourceType === "camera"
-                  ? stats.fps
-                    ? stats.fps.toFixed(1)
-                    : "—"
-                  : String(detections.length)
-              }
-            />
-            <Metric
-              label="Compute"
-              value={activeBackend ? activeBackend.toUpperCase() : "—"}
-            />
+          <div className="border-t border-white/10 px-4 py-2 text-xs tabular-nums text-white/50">
+            {analyzing
+              ? "Processing…"
+              : sourceType === "camera"
+                ? stats.fps
+                  ? `${stats.fps.toFixed(1)} fps`
+                  : "—"
+                : stats.inferMs || stats.postMs
+                  ? `${(stats.inferMs + stats.postMs).toFixed(0)} ms`
+                  : "—"}
           </div>
         </section>
 
         {/* ---------------- sidebar ---------------- */}
         <aside className="flex flex-col gap-4">
-          {/* models */}
-          <div className="panel p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Models</h2>
-              <button
-                onClick={wipeCache}
-                className="text-[11px] text-white/40 underline-offset-2 hover:text-white/70 hover:underline"
-              >
-                re-download
-              </button>
-            </div>
-
-            <div className="space-y-2">
-              {TASKS.map((t) => {
-                const load = loads[t];
-                return (
-                  <div
-                    key={t}
-                    className="rounded-xl border border-white/10 bg-white/[0.03] p-3"
-                  >
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-white/90">
-                        {MODELS[t].id}
-                      </span>
-                      <span className="text-white/45">
-                        {formatBytes(MODELS[t].size)}
-                      </span>
-                    </div>
-                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-                      <div
-                        className={
-                          "h-full rounded-full transition-all " +
-                          (load.state === "error"
-                            ? "bg-rose-400"
-                            : load.state === "ready"
-                              ? "bg-emerald-400"
-                              : "bg-gradient-to-r from-sky-400 to-violet-400")
-                        }
-                        style={{ width: `${load.state === "ready" ? 100 : load.pct}%` }}
-                      />
-                    </div>
-                    <div className="mt-1.5 flex items-center gap-2 text-[11px]">
-                      <span
-                        className={
-                          "rounded-md px-1.5 py-0.5 font-medium " +
-                          (load.state === "ready"
-                            ? "bg-emerald-400/15 text-emerald-300"
-                            : load.state === "error"
-                              ? "bg-rose-400/15 text-rose-300"
-                              : "bg-white/10 text-white/50")
-                        }
-                      >
-                        {load.state === "ready"
-                          ? load.cached
-                            ? "on device"
-                            : "loaded"
-                          : load.state === "error"
-                            ? "error"
-                            : load.state === "idle"
-                              ? "idle"
-                              : `${load.pct}%`}
-                      </span>
-                      <span className="truncate text-white/40">{load.message}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-3">
-              <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-white/40">
-                Compute
-              </div>
-              <div className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1">
-                {(["auto", "webgpu", "wasm"] as BackendPref[]).map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => changeBackend(p)}
-                    className={
-                      "flex-1 rounded-md px-2 py-1 text-[11px] font-medium transition " +
-                      (backendPref === p
-                        ? "bg-white/15 text-white"
-                        : "text-white/50 hover:text-white")
-                    }
-                  >
-                    {p === "auto" ? "Auto" : p.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
           {/* samples */}
           <div className="panel p-4">
             <h2 className="mb-3 text-sm font-semibold">Sample images</h2>
@@ -880,8 +654,9 @@ export default function YoloStudio() {
                 <button
                   key={s.id}
                   onClick={() => selectSample(s)}
+                  title={s.label}
                   className={
-                    "group relative overflow-hidden rounded-lg border transition " +
+                    "group relative aspect-square overflow-hidden rounded-lg border transition " +
                     (sampleId === s.id
                       ? "border-sky-400/70"
                       : "border-white/10 hover:border-white/30")
@@ -891,12 +666,8 @@ export default function YoloStudio() {
                   <img
                     src={s.src}
                     alt={s.label}
-                    className="aspect-square w-full object-cover opacity-90 group-hover:opacity-100"
+                    className="h-full w-full object-cover opacity-90 group-hover:opacity-100"
                   />
-                  <span className="absolute inset-x-0 bottom-0 bg-black/65 px-1.5 py-1 text-left text-[10px] leading-tight">
-                    {s.label}
-                    <span className="block text-white/50">{s.hint}</span>
-                  </span>
                 </button>
               ))}
             </div>
@@ -944,112 +715,10 @@ export default function YoloStudio() {
                   setKptThreshold(v);
                 }}
               />
-            ) : (
-              <p className="text-xs leading-relaxed text-white/45">
-                Every detection is a manufacturing defect. Lower the confidence
-                threshold to surface fainter faults; the head is NMS-free, so
-                each listed box is already a final verdict.
-              </p>
-            )}
-          </div>
-
-          {/* detections */}
-          <div className="panel p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Detections</h2>
-              <span className="text-[11px] text-white/40">
-                {analyzing ? "analysing…" : `${detections.length} found`}
-              </span>
-            </div>
-            {detections.length === 0 ? (
-              <p className="text-xs leading-relaxed text-white/40">
-                {mode === "pose"
-                  ? "No people detected in this image."
-                  : mode === "detect"
-                    ? `No defects found — the board passes at ${conf.toFixed(2)}.`
-                    : `Nothing above ${conf.toFixed(2)} confidence.`}
-              </p>
-            ) : (
-              <ul className="max-h-[280px] space-y-1.5 overflow-y-auto pr-1">
-                {detections.slice(0, 40).map((d, i) => (
-                  <li
-                    key={`${d.classId}-${i}`}
-                    className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-2.5 py-1.5 text-xs"
-                  >
-                    <span
-                      className="h-2.5 w-2.5 shrink-0 rounded-full"
-                      style={{ background: classColor(d.classId) }}
-                    />
-                    <span className="flex-1 truncate capitalize">{d.className}</span>
-                    {d.task === "pose" && (
-                      <span className="text-[10px] text-white/35">
-                        {d.keypoints.filter((k) => k.score > kptThreshold).length} kp
-                      </span>
-                    )}
-                    <span className="tabular-nums text-white/50">
-                      {(d.score * 100).toFixed(0)}%
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
+            ) : null}
           </div>
         </aside>
       </div>
-
-      <footer className="mx-auto max-w-[1400px] px-4 pb-8 pt-2 text-[11px] leading-relaxed text-white/35">
-        <p>
-          Weights: Ultralytics YOLO26n (AGPL-3.0), exported to ONNX by the community
-          and fetched from Hugging Face. Inference runs locally with ONNX Runtime Web —
-          no image ever leaves your device.
-        </p>
-        <p className="mt-1.5">
-          Defect inspection uses the YOLO26 PCB detector by{" "}
-          <a
-            href="https://huggingface.co/betty0/pcb-defect-detection"
-            target="_blank"
-            rel="noreferrer"
-            className="underline underline-offset-2 hover:text-white/60"
-          >
-            betty0
-          </a>{" "}
-          (AGPL-3.0), fine-tuned on the HRIPCB / PKU-Market-PCB dataset (Huang &amp;
-          Wei, arXiv:1901.08204). Sample board images courtesy of that model repo.
-        </p>
-      </footer>
-    </div>
-  );
-}
-
-function ModeBadge({ load, active }: { load: LoadState; active: boolean }) {
-  if (load.state === "ready") {
-    return (
-      <span className="ml-auto shrink-0 text-sm" title="Model ready">
-        {active ? "✓" : "●"}
-      </span>
-    );
-  }
-  if (load.state === "error") {
-    return <span className="ml-auto shrink-0 text-sm text-rose-400">▲</span>;
-  }
-  return (
-    <span className="ml-auto shrink-0 text-[11px] tabular-nums opacity-70">
-      {load.state === "working"
-        ? `${load.pct}%`
-        : load.state === "idle"
-          ? "○"
-          : "…"}
-    </span>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="text-[10px] font-medium uppercase tracking-wider text-white/35">
-        {label}
-      </div>
-      <div className="text-sm tabular-nums text-white/90">{value}</div>
     </div>
   );
 }
