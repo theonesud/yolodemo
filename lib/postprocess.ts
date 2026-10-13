@@ -15,6 +15,7 @@ import { COCO_CLASSES, classColor } from "./coco";
 export const MAX_DETECTIONS = 300;
 export const MASK_ROWS = 38; // 6 + 32
 export const POSE_ROW = 57; // 6 + 17 * 3
+export const DETECT_ROW = 6; // xyxy + conf + cls (NMS-free e2e detection head)
 export const MASK_THRESHOLD = 0.5;
 
 export interface Keypoint {
@@ -46,7 +47,12 @@ export interface PoseDetection extends BaseDetection {
   keypoints: Keypoint[];
 }
 
-export type Detection = SegDetection | PoseDetection;
+/** Plain NMS-free detection (e.g. the PCB defect head). */
+export interface DetectDetection extends BaseDetection {
+  task: "detect";
+}
+
+export type Detection = SegDetection | PoseDetection | DetectDetection;
 
 export interface DecodeOptions {
   confidence: number;
@@ -243,6 +249,45 @@ export function decodePose(
     }
 
     detections.push({ task: "pose", box: origBox, score, classId, className, keypoints });
+  }
+
+  detections.sort((a, b) => b.score - a.score);
+  return detections;
+}
+
+/**
+ * Decodes an NMS-free end-to-end detection head: 300 rows of
+ * `[x1, y1, x2, y2, conf, cls]` in letterboxed input pixels. Because the graph
+ * already resolves overlaps, there is no non-max suppression to run here.
+ */
+export function decodeDetection(
+  out0: Float32Array,
+  meta: LetterboxMeta,
+  confidence: number,
+  classNames: string[],
+): DetectDetection[] {
+  const detections: DetectDetection[] = [];
+
+  for (let i = 0; i < MAX_DETECTIONS; i++) {
+    const base = i * DETECT_ROW;
+    const score = out0[base + 4];
+    if (score < confidence) continue;
+
+    const classId = Math.round(out0[base + 5]);
+    const className = classNames[classId] ?? `class ${classId}`;
+
+    const origBox = clampBox(
+      [
+        toOriginal(out0[base], meta.padX, meta.scale),
+        toOriginal(out0[base + 1], meta.padY, meta.scale),
+        toOriginal(out0[base + 2], meta.padX, meta.scale),
+        toOriginal(out0[base + 3], meta.padY, meta.scale),
+      ],
+      meta.origW,
+      meta.origH,
+    );
+
+    detections.push({ task: "detect", box: origBox, score, classId, className });
   }
 
   detections.sort((a, b) => b.score - a.score);

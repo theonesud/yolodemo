@@ -20,7 +20,7 @@ import {
   type Task,
 } from "./models";
 import { INPUT_SIZE, letterbox, type LetterboxMeta } from "./preprocess";
-import { decodePose, decodeSegmentation, type Detection } from "./postprocess";
+import { decodePose, decodeSegmentation, decodeDetection, type Detection } from "./postprocess";
 
 type Ort = typeof import("onnxruntime-web");
 
@@ -250,7 +250,10 @@ export class YoloEngine {
         true,
       );
     }
-    return decodePose(out0, meta, confidence);
+    if (this.task === "pose") {
+      return decodePose(out0, meta, confidence);
+    }
+    return decodeDetection(out0, meta, confidence, this.spec.classNames ?? []);
   }
 
   /** Runs the model on one frame and returns decoded detections. */

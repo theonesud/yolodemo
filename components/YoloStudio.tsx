@@ -18,17 +18,36 @@ import { drawOverlay } from "@/lib/draw";
 import { classColor } from "@/lib/coco";
 import type { Detection } from "@/lib/postprocess";
 
-const TASKS: Task[] = ["seg", "pose"];
+const TASKS: Task[] = ["seg", "pose", "detect"];
 
 const MODES: { task: Task; icon: string; label: string; blurb: string }[] = [
   { task: "seg", icon: "◧", label: "Segmentation", blurb: "boxes + pixel masks" },
   { task: "pose", icon: "⌇", label: "Pose estimation", blurb: "17 keypoints + skeleton" },
+  { task: "detect", icon: "⚠", label: "Defect inspection", blurb: "PCB AOI · 6 defect types" },
 ];
 
-const SAMPLES: { id: string; label: string; src: string; hint: string }[] = [
-  { id: "bus", label: "Street scene", src: "/samples/bus.jpg", hint: "both modes" },
-  { id: "zidane", label: "Footballers", src: "/samples/zidane.jpg", hint: "pose" },
-  { id: "cats", label: "Cats & remotes", src: "/samples/cats.jpg", hint: "segmentation" },
+// Per-mode starting confidence. Defect inspection begins stricter (0.50) so
+// only confident fault verdicts surface by default; the COCO modes keep 0.35.
+const DEFAULT_CONF: Record<Task, number> = { seg: 0.35, pose: 0.35, detect: 0.5 };
+
+type SampleMode = Task;
+
+const SAMPLES: {
+  id: string;
+  label: string;
+  src: string;
+  hint: string;
+  modes: SampleMode[];
+}[] = [
+  { id: "bus", label: "Street scene", src: "/samples/bus.jpg", hint: "seg · pose", modes: ["seg", "pose"] },
+  { id: "zidane", label: "Footballers", src: "/samples/zidane.jpg", hint: "pose", modes: ["pose"] },
+  { id: "cats", label: "Cats & remotes", src: "/samples/cats.jpg", hint: "segmentation", modes: ["seg"] },
+  { id: "pcb-missing-hole", label: "Missing hole", src: "/samples/pcb/missing_hole.jpg", hint: "PCB defect", modes: ["detect"] },
+  { id: "pcb-mouse-bite", label: "Mouse bite", src: "/samples/pcb/mouse_bite.jpg", hint: "PCB defect", modes: ["detect"] },
+  { id: "pcb-open-circuit", label: "Open circuit", src: "/samples/pcb/open_circuit.jpg", hint: "PCB defect", modes: ["detect"] },
+  { id: "pcb-short", label: "Short", src: "/samples/pcb/short.jpg", hint: "PCB defect", modes: ["detect"] },
+  { id: "pcb-spur", label: "Spur", src: "/samples/pcb/spur.jpg", hint: "PCB defect", modes: ["detect"] },
+  { id: "pcb-spurious-copper", label: "Spurious copper", src: "/samples/pcb/spurious_copper.jpg", hint: "PCB defect", modes: ["detect"] },
 ];
 
 const DEFAULT_SAMPLE = SAMPLES[0];
@@ -58,17 +77,19 @@ export default function YoloStudio() {
   const [backendPref, setBackendPref] = useState<BackendPref>("auto");
   const [sourceType, setSourceType] = useState<"still" | "camera">("still");
   const [sampleId, setSampleId] = useState<string | null>(DEFAULT_SAMPLE.id);
-  const [conf, setConf] = useState(0.35);
+  const [conf, setConf] = useState(DEFAULT_CONF.seg);
   const [maskOpacity, setMaskOpacity] = useState(0.45);
   const [kptThreshold, setKptThreshold] = useState(0.5);
 
   const [loads, setLoads] = useState<Record<Task, LoadState>>({
     seg: idleState(),
     pose: idleState(),
+    detect: idleState(),
   });
   const [backends, setBackends] = useState<Record<Task, Backend | null>>({
     seg: null,
     pose: null,
+    detect: null,
   });
   const [detections, setDetections] = useState<Detection[]>([]);
   const [stats, setStats] = useState<Stats>({ inferMs: 0, postMs: 0, fps: null });
@@ -80,6 +101,8 @@ export default function YoloStudio() {
 
   // ---- refs (mutable mirrors used by the animation loop) -------------------
   const ui = useRef({ mode, conf, maskOpacity, kptThreshold });
+  // Remembers the confidence chosen per mode so switching modes restores it.
+  const confByTask = useRef<Record<Task, number>>({ ...DEFAULT_CONF });
   const sourceTypeRef = useRef<"still" | "camera">("still");
   const detsRef = useRef<Detection[]>([]);
   const engines = useRef<Map<Task, YoloEngine>>(new Map());
@@ -462,7 +485,25 @@ export default function YoloStudio() {
     detsRef.current = [];
     setDetections([]);
     setStats({ inferMs: 0, postMs: 0, fps: null });
+    // Restore this mode's confidence (defect mode defaults to 0.50).
+    const nextConf = confByTask.current[task];
+    ui.current.conf = nextConf;
+    setConf(nextConf);
     void ensureEngine(task).catch(() => {});
+
+    // Don't leave a photo loaded that the new mode can't serve (e.g. a
+    // football photo in defect mode). Swap in a sample that fits, unless the
+    // user is on their own uploaded image.
+    if (sourceTypeRef.current === "still" && sampleId) {
+      const current = SAMPLES.find((s) => s.id === sampleId);
+      if (!current || !current.modes.includes(task)) {
+        const next = SAMPLES.find((s) => s.modes.includes(task));
+        if (next) {
+          setSampleId(next.id);
+          loadStill(next.src, `sample:${next.id}`);
+        }
+      }
+    }
   };
 
   const selectSample = (sample: (typeof SAMPLES)[number]) => {
@@ -483,8 +524,8 @@ export default function YoloStudio() {
     engines.current.forEach((e) => e.dispose());
     engines.current.clear();
     pending.current.clear();
-    setBackends({ seg: null, pose: null });
-    setLoads({ seg: idleState(), pose: idleState() });
+    setBackends({ seg: null, pose: null, detect: null });
+    setLoads({ seg: idleState(), pose: idleState(), detect: idleState() });
   };
 
   const changeBackend = (pref: BackendPref) => {
@@ -518,7 +559,7 @@ export default function YoloStudio() {
             <div>
               <h1 className="text-sm font-semibold leading-tight">YOLO26 Studio</h1>
               <p className="text-[11px] leading-tight text-white/45">
-                On-device · segmentation &amp; pose
+                On-device · seg, pose &amp; defect QA
               </p>
             </div>
           </div>
@@ -542,7 +583,7 @@ export default function YoloStudio() {
         {/* ---------------- viewport ---------------- */}
         <section className="panel overflow-hidden">
           {/* big, unmissable mode switch */}
-          <div className="grid grid-cols-1 gap-2 p-2 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-2 p-2 sm:grid-cols-3">
             {MODES.map((m) => {
               const load = loads[m.task];
               const active = mode === m.task;
@@ -655,8 +696,8 @@ export default function YoloStudio() {
                       : `Downloading / loading the model — ${activeLoad.message}`}
                   </p>
                   <p className="mt-1 text-[11px] leading-relaxed text-white/35">
-                    Both models load automatically and are cached on this device
-                    for offline use.
+                    Models load on demand and are cached on this device for
+                    offline use.
                   </p>
                 </div>
               </div>
@@ -670,7 +711,14 @@ export default function YoloStudio() {
           </div>
 
           {showEmptyHint && (
-            <div className="border-t border-white/10 bg-amber-400/10 px-4 py-2 text-xs text-amber-200">
+            <div
+              className={
+                "border-t px-4 py-2 text-xs " +
+                (mode === "detect"
+                  ? "border-white/10 bg-emerald-400/10 text-emerald-200"
+                  : "border-white/10 bg-amber-400/10 text-amber-200")
+              }
+            >
               {mode === "pose" ? (
                 <>
                   Pose only detects people.{" "}
@@ -683,6 +731,11 @@ export default function YoloStudio() {
                     Try the Footballers sample
                   </button>
                   .
+                </>
+              ) : mode === "detect" ? (
+                <>
+                  No defects above {conf.toFixed(2)} confidence — this board reads
+                  clean. Lower the threshold to catch fainter defects.
                 </>
               ) : (
                 <>
@@ -703,7 +756,13 @@ export default function YoloStudio() {
               value={stats.postMs ? `${stats.postMs.toFixed(1)} ms` : "—"}
             />
             <Metric
-              label={sourceType === "camera" ? "FPS" : "Objects"}
+              label={
+                sourceType === "camera"
+                  ? "FPS"
+                  : mode === "detect"
+                    ? "Defects"
+                    : "Objects"
+              }
               value={
                 sourceType === "camera"
                   ? stats.fps
@@ -817,7 +876,7 @@ export default function YoloStudio() {
           <div className="panel p-4">
             <h2 className="mb-3 text-sm font-semibold">Sample images</h2>
             <div className="grid grid-cols-3 gap-2">
-              {SAMPLES.map((s) => (
+              {SAMPLES.filter((s) => s.modes.includes(mode)).map((s) => (
                 <button
                   key={s.id}
                   onClick={() => selectSample(s)}
@@ -855,6 +914,7 @@ export default function YoloStudio() {
               display={conf.toFixed(2)}
               onChange={(v) => {
                 ui.current.conf = v;
+                confByTask.current[mode] = v;
                 setConf(v);
               }}
             />
@@ -871,7 +931,7 @@ export default function YoloStudio() {
                   setMaskOpacity(v);
                 }}
               />
-            ) : (
+            ) : mode === "pose" ? (
               <Slider
                 label="Keypoint threshold"
                 value={kptThreshold}
@@ -884,6 +944,12 @@ export default function YoloStudio() {
                   setKptThreshold(v);
                 }}
               />
+            ) : (
+              <p className="text-xs leading-relaxed text-white/45">
+                Every detection is a manufacturing defect. Lower the confidence
+                threshold to surface fainter faults; the head is NMS-free, so
+                each listed box is already a final verdict.
+              </p>
             )}
           </div>
 
@@ -899,7 +965,9 @@ export default function YoloStudio() {
               <p className="text-xs leading-relaxed text-white/40">
                 {mode === "pose"
                   ? "No people detected in this image."
-                  : `Nothing above ${conf.toFixed(2)} confidence.`}
+                  : mode === "detect"
+                    ? `No defects found — the board passes at ${conf.toFixed(2)}.`
+                    : `Nothing above ${conf.toFixed(2)} confidence.`}
               </p>
             ) : (
               <ul className="max-h-[280px] space-y-1.5 overflow-y-auto pr-1">
@@ -930,9 +998,24 @@ export default function YoloStudio() {
       </div>
 
       <footer className="mx-auto max-w-[1400px] px-4 pb-8 pt-2 text-[11px] leading-relaxed text-white/35">
-        Weights: Ultralytics YOLO26n (AGPL-3.0), exported to ONNX by the community
-        and fetched from Hugging Face. Inference runs locally with ONNX Runtime Web —
-        no image ever leaves your device.
+        <p>
+          Weights: Ultralytics YOLO26n (AGPL-3.0), exported to ONNX by the community
+          and fetched from Hugging Face. Inference runs locally with ONNX Runtime Web —
+          no image ever leaves your device.
+        </p>
+        <p className="mt-1.5">
+          Defect inspection uses the YOLO26 PCB detector by{" "}
+          <a
+            href="https://huggingface.co/betty0/pcb-defect-detection"
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-2 hover:text-white/60"
+          >
+            betty0
+          </a>{" "}
+          (AGPL-3.0), fine-tuned on the HRIPCB / PKU-Market-PCB dataset (Huang &amp;
+          Wei, arXiv:1901.08204). Sample board images courtesy of that model repo.
+        </p>
       </footer>
     </div>
   );

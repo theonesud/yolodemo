@@ -13,7 +13,7 @@
  * Storage API, so every later visit is instant and works fully offline.
  */
 
-export type Task = "seg" | "pose";
+export type Task = "seg" | "pose" | "detect";
 
 export interface ModelSpec {
   task: Task;
@@ -26,9 +26,28 @@ export interface ModelSpec {
   /** Number of mask prototypes (seg only). */
   maskCoeffs?: number;
   protoSize?: number;
+  /**
+   * Class names indexed by class id. Seg/pose fall back to the COCO lists in
+   * `coco.ts`; single-purpose models (like the PCB defect detector) ship their
+   * own names here.
+   */
+  classNames?: string[];
 }
 
 const HF = "https://huggingface.co/zwh20081/yolo26-onnx/resolve/main";
+
+/**
+ * Bare-board PCB defects (HRIPCB / PKU-Market-PCB). Six manufacturing-quality
+ * failure modes an Automated Optical Inspection (AOI) line would screen for.
+ */
+export const PCB_DEFECT_CLASSES: string[] = [
+  "missing_hole",
+  "mouse_bite",
+  "open_circuit",
+  "short",
+  "spur",
+  "spurious_copper",
+];
 
 export const MODELS: Record<Task, ModelSpec> = {
   seg: {
@@ -48,6 +67,19 @@ export const MODELS: Record<Task, ModelSpec> = {
     size: 12_125_279,
     url: `${HF}/yolo26n-pose.onnx`,
     inputSize: 640,
+  },
+  /**
+   * NMS-free end-to-end detection head: output0 [1,300,6] = (xyxy, conf, cls)
+   * in letterboxed 640 input pixels — no NMS, no mask prototypes.
+   */
+  detect: {
+    task: "detect",
+    id: "yolo26s-pcb-defect",
+    label: "YOLO26s · PCB defects",
+    size: 38_175_508,
+    url: "https://huggingface.co/betty0/pcb-defect-detection/resolve/main/best.onnx",
+    inputSize: 640,
+    classNames: PCB_DEFECT_CLASSES,
   },
 };
 

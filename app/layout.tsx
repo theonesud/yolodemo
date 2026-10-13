@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "YOLO26 in the browser",
   description:
-    "Run YOLO26 nano segmentation and pose estimation fully on-device with ONNX Runtime Web.",
+    "Run YOLO26 segmentation, pose estimation and PCB defect inspection fully on-device with ONNX Runtime Web.",
 };
 
 export const viewport: Viewport = {
