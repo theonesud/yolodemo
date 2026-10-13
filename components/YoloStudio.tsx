@@ -44,7 +44,7 @@ const idleState = (): LoadState => ({
   state: "idle",
   pct: 0,
   cached: false,
-  message: "Queued",
+  message: "Loads when selected",
 });
 
 interface Stats {
@@ -396,12 +396,12 @@ export default function YoloStudio() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // download + load BOTH models up front (re-runs if the backend changes)
+  // load only the active model up front; the other one is fetched lazily the
+  // first time its mode is selected so we never keep two WebGPU sessions
+  // resident in GPU memory at once (re-runs if the backend changes)
   useEffect(() => {
-    for (const task of TASKS) {
-      void ensureEngine(task).catch(() => {});
-    }
-  }, [ensureEngine]);
+    void ensureEngine(mode).catch(() => {});
+  }, [ensureEngine, mode]);
 
   // keep the mutable mirror in sync with rendered state
   useEffect(() => {
@@ -478,20 +478,27 @@ export default function YoloStudio() {
     else void startCamera();
   };
 
-  const changeBackend = (pref: BackendPref) => {
-    if (pref === backendPref) return;
+  const resetEngines = () => {
     generation.current += 1;
     engines.current.forEach((e) => e.dispose());
     engines.current.clear();
     pending.current.clear();
     setBackends({ seg: null, pose: null });
     setLoads({ seg: idleState(), pose: idleState() });
+  };
+
+  const changeBackend = (pref: BackendPref) => {
+    if (pref === backendPref) return;
+    resetEngines();
     setBackendPref(pref);
   };
 
   const wipeCache = async () => {
     await clearModelCache();
-    changeBackend(backendPref === "auto" ? "auto" : backendPref);
+    // Force a fresh load of the active model so the new download is used,
+    // even when the backend preference is unchanged.
+    resetEngines();
+    void ensureEngine(ui.current.mode).catch(() => {});
   };
 
   const activeLoad = loads[mode];
@@ -772,7 +779,9 @@ export default function YoloStudio() {
                             : "loaded"
                           : load.state === "error"
                             ? "error"
-                            : `${load.pct}%`}
+                            : load.state === "idle"
+                              ? "idle"
+                              : `${load.pct}%`}
                       </span>
                       <span className="truncate text-white/40">{load.message}</span>
                     </div>
@@ -942,7 +951,11 @@ function ModeBadge({ load, active }: { load: LoadState; active: boolean }) {
   }
   return (
     <span className="ml-auto shrink-0 text-[11px] tabular-nums opacity-70">
-      {load.state === "working" ? `${load.pct}%` : "…"}
+      {load.state === "working"
+        ? `${load.pct}%`
+        : load.state === "idle"
+          ? "○"
+          : "…"}
     </span>
   );
 }

@@ -95,16 +95,38 @@ function providersFor(pref: BackendPref): string[] {
   return isWebGpuAvailable() ? ["webgpu", "wasm"] : ["wasm"];
 }
 
+/**
+ * ONNX Runtime Web's WebGPU execution provider can only register one device
+ * at a time. Creating two sessions concurrently throws
+ * "another WebGPU EP inference session is being created." — the window is
+ * wider on slower machines, which is why it only bites some laptops. We funnel
+ * every session creation through a single promise chain so they run one at a
+ * time (downloads still happen in parallel).
+ */
+let createQueue: Promise<unknown> = Promise.resolve();
+
+function serializeSessionCreate<T>(run: () => Promise<T>): Promise<T> {
+  const result = createQueue.then(run, run);
+  // Keep the chain alive even when a create rejects.
+  createQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
 async function createSession(
   ort: Ort,
   bytes: ArrayBuffer,
   pref: BackendPref,
 ): Promise<{ session: InferenceSession; backend: Backend }> {
   const providers = providersFor(pref);
-  const session = await ort.InferenceSession.create(bytes, {
-    executionProviders: providers,
-    graphOptimizationLevel: "all",
-  });
+  const session = await serializeSessionCreate(() =>
+    ort.InferenceSession.create(bytes, {
+      executionProviders: providers,
+      graphOptimizationLevel: "all",
+    }),
+  );
   return { session, backend: providers[0] === "webgpu" ? "webgpu" : "wasm" };
 }
 
@@ -283,10 +305,12 @@ export class YoloEngine {
     } catch {
       /* ignore */
     }
-    this.session = await ort.InferenceSession.create(this.bytes, {
-      executionProviders: [backend],
-      graphOptimizationLevel: "all",
-    });
+    this.session = await serializeSessionCreate(() =>
+      ort.InferenceSession.create(this.bytes, {
+        executionProviders: [backend],
+        graphOptimizationLevel: "all",
+      }),
+    );
     this.backend = backend;
     this.pref = backend;
     this.raw = null;
